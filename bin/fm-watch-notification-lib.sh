@@ -60,6 +60,22 @@ fm_watch_notice_due() { # <kind> <source> <content>
   return 0
 }
 
+# A CI-green hint is a durable event, not a periodic reminder. Changing the
+# head/check fingerprint re-arms it. Record only after its wake was appended.
+fm_watch_notice_changed() { # <kind> <source> <content>
+  local path fingerprint previous='' last
+  path=$(fm_watch_notice_path "$1" "$2") || return 0
+  fingerprint=$(printf '%s' "$3" | fm_watch_notice_hash) || return 0
+  if [ -f "$path" ] && [ ! -L "$path" ]; then
+    read -r last previous < "$path" || true
+  fi
+  if [ "$fingerprint" = "$previous" ]; then
+    fm_watch_notice_metric suppressed "$1" "$2"
+    return 1
+  fi
+  return 0
+}
+
 fm_watch_notice_record() { # <kind> <source> <content>
   local path tmp fingerprint
   path=$(fm_watch_notice_path "$1" "$2") || return 0
