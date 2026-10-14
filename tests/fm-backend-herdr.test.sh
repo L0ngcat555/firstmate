@@ -3446,6 +3446,54 @@ test_presentation_session_lock_path_rejects_malformed_socket() {
   pass "herdr presentation lock: null and missing socket paths fail closed"
 }
 
+# Another account's session is not coordinated by this account's private lock
+# namespace, so a lock for it must be refused rather than handed out.
+test_presentation_session_lock_path_refuses_foreign_account_socket() {
+  local dir log resp fb path status real_stat
+  dir="$TMP_ROOT/presentation-foreign-socket"; mkdir -p "$dir/responses" "$dir/sockdir"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  : > "$dir/sockdir/fmtest.sock"
+  ln -s "$dir/sockdir/fmtest.sock" "$dir/sockdir/linked.sock"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/linked.sock\"}]}" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  path=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] && [ -z "$path" ] || fail "a symlinked session socket must refuse the presentation lock: $path"
+  if [ "$(uname -s)" = Darwin ]; then
+    pass "herdr presentation lock: symlinked socket refused (owner-shim arm needs the non-Darwin stat branch)"
+    return 0
+  fi
+  # Report the real socket file as owned by another uid through a PATH stat
+  # shim; the adapter reads ownership through PATH stat on non-Darwin hosts.
+  real_stat=$(command -v stat)
+  cat > "$fb/stat" <<SH
+#!/usr/bin/env bash
+if [ "\$#" -eq 3 ] && [ "\$1" = -c ] && [ "\$2" = %u ] && [ "\$3" = "$dir/sockdir/fmtest.sock" ]; then
+  printf '%s\n' "\$((\$(id -u) + 1))"
+  exit 0
+fi
+exec "$real_stat" "\$@"
+SH
+  chmod +x "$fb/stat"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/2.out"
+  path=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a session socket owned by another account must refuse the presentation lock: $path"
+  [ -z "$path" ] || fail "a foreign-account socket returned a lock path: $path"
+  rm -f "$fb/stat"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/3.out"
+  path=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT") \
+    || fail "this account's own session socket must still resolve the presentation lock"
+  case "$path" in
+    "/tmp/firstmate-herdr-presentation-$(id -u)"/order-*.lock) ;;
+    *) fail "own-account socket lock is not in this account's namespace: $path" ;;
+  esac
+  pass "herdr presentation lock: a symlinked or other-account session socket is refused, this account's own socket still locks"
+}
+
 test_projection_order_rejects_malformed_socket() {
   local dir log resp fb mover out status
   dir="$TMP_ROOT/projection-order-malformed-socket"; mkdir -p "$dir/responses"
@@ -6003,6 +6051,7 @@ test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
+test_presentation_session_lock_path_refuses_foreign_account_socket
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
