@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Firstmate watcher.
+# Custom-check batches contain at most FM_WATCH_CHECK_BATCH_MAX results (default
+# 4, capped at 16), with a ten-second collection bound checked between commands;
+# each command retains FM_CHECK_TIMEOUT. No debounce sleep is added.
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
 # The no-verb signal and stale path is absorb-only-on-positive-evidence: a wake
@@ -89,7 +92,9 @@
 #   stale: <window> (steering-inbox busy bookkeeping unwritable: ...)
 #                          steering-inbox recovery; bin/fm-task-inbox-lib.sh owns
 #                          delivery-attempt, busy-deferral, and unavailable-endpoint policy
-#   check: <script>: <out> authenticated check output, always actionable
+#   check: <script>: <out> authenticated check output; unchanged custom results
+#                          are bounded reminders, and changed results are batched
+#                          (fm-watch-notification-lib.sh owns suppression/metrics)
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -191,6 +196,8 @@ WATCH_HOME_EXISTED=0
 # runtime needlessly spends per-root CI lint memory while adding no uncovered file.
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
+# shellcheck source=bin/fm-watch-notification-lib.sh
+. "$SCRIPT_DIR/fm-watch-notification-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # Only for the arm-time check on FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS below;
@@ -2832,9 +2839,18 @@ while :; do
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
     contribution_check_output=
+    check_batch=''
+    check_batch_count=0
+    check_batch_started=$(date +%s)
+    check_batch_limit=${FM_WATCH_CHECK_BATCH_MAX:-4}
+    case "$check_batch_limit" in ''|*[!0-9]*|0) check_batch_limit=4 ;; esac
+    [ "$check_batch_limit" -le 16 ] || check_batch_limit=16
+    check_batch_more=0
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
+      is_custom_check=0
+      custom_generation=
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
@@ -2866,6 +2882,8 @@ while :; do
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
+          is_custom_check=1
+          custom_generation=$FM_CUSTOM_CHECK_HASH
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
           out=$FM_CHECK_RESULT
@@ -2939,12 +2957,40 @@ EOF
           wake "$reason"
         fi
         pr_poll_control_release || exit 1
+        if [ "$is_custom_check" -eq 1 ]; then
+          notice_content="$custom_generation:$out"
+          if ! fm_watch_notice_due check "$c" "$notice_content"; then
+            triage_log "absorbed unchanged custom check: ${c##*/}"
+            continue
+          fi
+        fi
         fm_wake_append check "$c" "$reason" || exit 1
-        touch "$STATE/.last-check"
-        wake "$reason"
+        if [ "$is_custom_check" -eq 1 ]; then
+          fm_watch_notice_record check "$c" "$notice_content"
+        fi
+        check_batch="${check_batch}${check_batch:+; }$(fm_watch_check_summary "$c" "$out")"
+        check_batch_count=$((check_batch_count + 1))
+        # Bound both payload and extra batching delay. An individual check keeps
+        # its existing timeout; no sleep/debounce delays actionable events.
+        if [ "$check_batch_count" -ge "$check_batch_limit" ] \
+          || [ "$(( $(date +%s) - check_batch_started ))" -ge 10 ]; then
+          check_batch_more=1
+          break
+        fi
+      elif [ "$is_custom_check" -eq 1 ]; then
+        fm_watch_notice_reset check "$c"
       fi
       pr_poll_control_release || exit 1
     done
+    if [ "$check_batch_count" -gt 0 ]; then
+      # Leave the cadence due when a batch filled, so remaining checks cannot
+      # starve behind noisy earlier siblings on the next watcher arm.
+      [ "$check_batch_more" -eq 1 ] || touch "$STATE/.last-check"
+      if [ "$check_batch_count" -eq 1 ]; then
+        wake "$check_batch"
+      fi
+      wake "check: batch ($check_batch_count): $check_batch; drain queued records once"
+    fi
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1

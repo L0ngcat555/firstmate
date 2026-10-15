@@ -2262,7 +2262,12 @@ seed_canonical_poll() {
 add_stop_custom_check() {
   local dir=$1 state
   state="$dir/home/state"
-  printf '#!/usr/bin/env bash\nprintf "stop-cycle\\n"\n' > "$state/z-stop.check.sh"
+  # A per-run token keeps every cycle's control output changed, so the
+  # watcher's bounded reminder for unchanged custom-check output never holds it.
+  cat > "$state/z-stop.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s-%s stop-cycle\n' "$(date +%s%N)" "$$"
+SH
   chmod 0700 "$state/z-stop.check.sh"
   FM_HOME="$dir/home" "$REGISTER" z-stop >/dev/null \
     || fail "could not register stop-cycle custom check"
