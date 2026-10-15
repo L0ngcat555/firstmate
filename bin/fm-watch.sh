@@ -2957,6 +2957,11 @@ EOF
           wake "$reason"
         fi
         pr_poll_control_release || exit 1
+        if [ "$is_pr_poll" -eq 1 ] && [[ "$out" == ci-green:* ]] \
+          && ! fm_watch_notice_changed ci-green "$c" "$out"; then
+          triage_log "absorbed unchanged CI-green hint: $id"
+          continue
+        fi
         if [ "$is_custom_check" -eq 1 ]; then
           notice_content="$custom_generation:$out"
           if ! fm_watch_notice_due check "$c" "$notice_content"; then
@@ -2965,6 +2970,9 @@ EOF
           fi
         fi
         fm_wake_append check "$c" "$reason" || exit 1
+        if [ "$is_pr_poll" -eq 1 ] && [[ "$out" == ci-green:* ]]; then
+          fm_watch_notice_record ci-green "$c" "$out"
+        fi
         if [ "$is_custom_check" -eq 1 ]; then
           fm_watch_notice_record check "$c" "$notice_content"
         fi

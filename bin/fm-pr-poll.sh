@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated pull request, merge request, or Gerrit
 # change poll sidecar.
-# It emits exactly one merged line for a merged change and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
+# It emits merged for a merged change, or ci-green with the observed head and
+# check fingerprint for an open GitHub PR with nonempty successful checks, and
+# stays silent otherwise, including on every error, so a failed lookup can
+# never be read as a merge. ci-green is only a scheduling hint: the merge owner
+# still rechecks required contexts, candidate freshness, reviews and authority.
+# The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
-# needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
-# branches additionally need jq, which bin/fm-pr-check.sh refuses to arm those
-# watches without.
+# needs no extra tooling to follow GitHub or GitLab merges. The GitHub ci-green
+# hint, Gerrit and Forgejo additionally need jq; bin/fm-pr-check.sh refuses to
+# arm Gerrit and Forgejo watches without it, and without it a GitHub watch
+# reports merges only.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -67,7 +71,37 @@ case "$provider" in
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
     state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    if [ "$state" = MERGED ]; then
+      printf '%s\n' merged
+      exit 0
+    fi
+    [ "$state" = OPEN ] || exit 0
+    command -v jq >/dev/null 2>&1 || exit 0
+    snapshot=$(gh pr view "$url" --json state,headRefOid,statusCheckRollup 2>/dev/null) || exit 0
+    # Be conservative about pending, failed, skipped, unknown and empty data.
+    # A check rerun with an older failure may delay this hint, never authorize it.
+    head=$(printf '%s' "$snapshot" | jq -er '
+      select(.state == "OPEN" and (.headRefOid | test("^[a-f0-9]{40}$")))
+      | select((.statusCheckRollup | type) == "array" and (.statusCheckRollup | length) > 0)
+      | select(all(.statusCheckRollup[];
+          if .__typename == "CheckRun" then .status == "COMPLETED" and .conclusion == "SUCCESS"
+          elif .__typename == "StatusContext" then .state == "SUCCESS" else false end))
+      | .headRefOid' 2>/dev/null) || exit 0
+    # gh versions without JSON checks still expose --required. An explicit
+    # no-required result uses the nonempty all-reported rollup above; every
+    # other failure (including pending required checks) stays silent.
+    required=$(gh pr checks "$url" --required 2>&1)
+    required_rc=$?
+    if [ "$required_rc" -ne 0 ]; then
+      case "$required" in
+        "no required checks reported on the "*" branch") ;;
+        *) exit 0 ;;
+      esac
+    fi
+    after=$(gh pr view "$url" --json state,headRefOid -q '[.state,.headRefOid] | join(" ")' 2>/dev/null) || exit 0
+    [ "$after" = "OPEN $head" ] || exit 0
+    fingerprint=$(printf '%s' "$snapshot" | jq -cS '.statusCheckRollup | sort_by(.name // .context)' | cksum) || exit 0
+    printf 'ci-green: %s %s (recheck merge gates)\n' "$head" "$fingerprint"
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
