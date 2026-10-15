@@ -319,9 +319,9 @@ if [ "$KIND" = ship ]; then
   # A Forgejo project's pull requests are handled with tea, so the ship brief's
   # forge-CLI rule names it instead of gh-axi; every other forge keeps gh-axi.
   if [ "$FORGE" = forgejo ]; then
-    FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations."
+    FORGE_RULE_LINE="Use tea for Forgejo operations. For browser work, use the browser automation tool this host documents and confirm it can actually attach before relying on it."
   else
-    FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations."
+    FORGE_RULE_LINE="Use gh-axi for GitHub operations. For browser work, use the browser automation tool this host documents and confirm it can actually attach before relying on it."
   fi
 elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
@@ -689,7 +689,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use `gh-axi` for GitHub operations. For browser work, use the browser automation tool this host documents - your home's browser guidance or the project's own instructions - and confirm it can actually attach before relying on it; if it cannot, report the exact error and stop rather than retrying it or substituting a weaker check.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
