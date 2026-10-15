@@ -3055,7 +3055,7 @@ test_herdr_teardown_presentation_lock_namespace_is_per_account() {
     linux_arms=1
     # The old shared name is owned by another uid whenever it exists here, as
     # on a host where a second account created it first; this account's
-    # teardown no longer consults it and completes in its own namespace.
+    # teardown leaves it untouched and completes in its own namespace.
     case_dir=$(new_herdr_lock_ns_case herdr-lock-ns-other-account)
     run_herdr_lock_ns_teardown "$case_dir" "$fake_uid" "$own_ns:$fake_uid:700" \
       || fail "herdr-lock-ns-other-account: teardown was blocked: $(cat "$case_dir/stderr")"

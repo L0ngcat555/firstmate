@@ -3397,7 +3397,7 @@ test_presentation_session_lock_path_is_shared_across_homes() {
     || fail "session lock path resolution failed for home B"
   [ "$path_a" = "$path_b" ] || fail "same session/socket must resolve one shared lock path"
   case "$path_a" in
-    "/tmp/firstmate-herdr-presentation-$(id -u)"/order-*.lock) ;;
+    "/tmp/firstmate-herdr-presentation-$(id -u)"/order-*.lock|/tmp/firstmate-herdr-presentation/order-*.lock) ;;
     *) fail "session lock path must use this account's namespace: $path_a" ;;
   esac
   case "$path_a" in
@@ -3488,10 +3488,44 @@ SH
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT") \
     || fail "this account's own session socket must still resolve the presentation lock"
   case "$path" in
-    "/tmp/firstmate-herdr-presentation-$(id -u)"/order-*.lock) ;;
+    "/tmp/firstmate-herdr-presentation-$(id -u)"/order-*.lock|/tmp/firstmate-herdr-presentation/order-*.lock) ;;
     *) fail "own-account socket lock is not in this account's namespace: $path" ;;
   esac
   pass "herdr presentation lock: a symlinked or other-account session socket is refused, this account's own socket still locks"
+}
+
+# A legacy unsuffixed namespace this account owns keeps its lock identity across
+# an upgrade; any other legacy path is left untouched and the uid-suffixed one is
+# used. Filesystem-only: the legacy name is redirected into this test's temp dir.
+test_presentation_lock_namespace_keeps_owned_legacy() {
+  local dir uid out status
+  dir="$TMP_ROOT/presentation-legacy-namespace"; mkdir -p "$dir"
+  uid=$(id -u)
+  # shellcheck disable=SC2016
+  local resolve='. "$0/bin/backends/herdr.sh"
+fixture_legacy=$1 fixture_owner=${2:-}
+fm_backend_herdr_presentation_legacy_lock_namespace() { printf "%s" "$fixture_legacy"; }
+[ -z "$fixture_owner" ] || fm_backend_herdr_presentation_lock_namespace_uid() { printf "%s" "$fixture_owner"; }
+fm_backend_herdr_presentation_lock_namespace'
+  out=$(bash -c "$resolve" "$ROOT" "$dir/legacy") || fail "absent legacy namespace refused"
+  [ "$out" = "$dir/legacy-$uid" ] || fail "absent legacy must select the uid namespace: $out"
+  mkdir -m 700 "$dir/legacy"
+  out=$(bash -c "$resolve" "$ROOT" "$dir/legacy") || fail "owned legacy namespace refused"
+  [ "$out" = "$dir/legacy" ] || fail "an owned mode-700 legacy namespace must stay authoritative: $out"
+  chmod 755 "$dir/legacy"
+  status=0; out=$(bash -c "$resolve" "$ROOT" "$dir/legacy") || status=$?
+  [ "$status" -ne 0 ] && [ -z "$out" ] || fail "an owned wrong-mode legacy namespace must be refused: $out"
+  chmod 700 "$dir/legacy"
+  out=$(bash -c "$resolve" "$ROOT" "$dir/legacy" "$((uid + 1))") || fail "foreign legacy namespace refused"
+  [ "$out" = "$dir/legacy-$uid" ] || fail "a foreign-owned legacy must select the uid namespace: $out"
+  [ -d "$dir/legacy" ] || fail "a foreign-owned legacy namespace was changed"
+  rmdir "$dir/legacy"
+  mkdir -m 700 "$dir/target"
+  ln -s "$dir/target" "$dir/legacy"
+  out=$(bash -c "$resolve" "$ROOT" "$dir/legacy") || fail "symlink legacy namespace refused"
+  [ "$out" = "$dir/legacy-$uid" ] || fail "a symlink legacy must select the uid namespace: $out"
+  [ -L "$dir/legacy" ] || fail "a symlink legacy namespace was replaced"
+  pass "herdr presentation lock: an owned legacy namespace stays authoritative; absent, foreign, or symlink legacy uses the uid namespace"
 }
 
 test_projection_order_rejects_malformed_socket() {
@@ -6052,6 +6086,7 @@ test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
 test_presentation_session_lock_path_refuses_foreign_account_socket
+test_presentation_lock_namespace_keeps_owned_legacy
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
