@@ -786,13 +786,32 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
 # The uid rather than $XDG_RUNTIME_DIR names it because that variable can differ
 # or be absent between login contexts of one account, which would split one
 # session's lock across processes.
+# A legacy unsuffixed directory that this account already owns stays
+# authoritative, so an upgrade does not split one lock domain between callers
+# still on the legacy path and callers on the suffixed path; if it is not mode
+# 700 the lock is refused rather than silently moved to the suffixed name. A
+# legacy path that is absent, a symlink, or owned by another account is never
+# modified or traversed, and this account uses its suffixed namespace instead.
+fm_backend_herdr_presentation_legacy_lock_namespace() {
+  printf '%s' '/tmp/firstmate-herdr-presentation'
+}
+
 fm_backend_herdr_presentation_lock_namespace() {
-  local uid
+  local legacy uid owner
+  legacy=$(fm_backend_herdr_presentation_legacy_lock_namespace) || return 1
   uid=$(id -u 2>/dev/null) || return 1
   case "$uid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  printf '/tmp/firstmate-herdr-presentation-%s' "$uid"
+  if [ -e "$legacy" ] && [ ! -L "$legacy" ]; then
+    owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$legacy") || return 1
+    if [ "$owner" = "$uid" ]; then
+      fm_backend_herdr_presentation_lock_namespace_valid "$legacy" || return 1
+      printf '%s' "$legacy"
+      return 0
+    fi
+  fi
+  printf '%s-%s' "$legacy" "$uid"
 }
 
 fm_backend_herdr_presentation_lock_namespace_mode() {
