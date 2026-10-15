@@ -820,6 +820,24 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
   [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
 }
 
+# fm_backend_herdr_presentation_socket_owned: succeed only when the resolved
+# session socket is not reachable through another account's lock namespace.
+# The namespace above is private to this account, so its lock excludes only
+# this account's callers; a socket owned by another uid (reachable only with
+# privilege or loosened permissions) would let that owner's Firstmate mutate
+# the same session under a different lock, so it is refused rather than locked.
+# A symlinked socket is refused because its link owner proves nothing about
+# the endpoint. An absent socket file names no endpoint any caller can reach
+# and keeps the earlier resolution behavior.
+fm_backend_herdr_presentation_socket_owned() {  # <socket-path>
+  local socket=$1 expected_uid owner
+  [ ! -L "$socket" ] || return 1
+  [ -e "$socket" ] || return 0
+  expected_uid=$(id -u 2>/dev/null) || return 1
+  owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$socket") || return 1
+  [ "$owner" = "$expected_uid" ]
+}
+
 # Resolve the one verified running named-session socket path as an absolute
 # string. Requires JSON string type and non-empty length (jq -r is never used:
 # it would turn JSON null into the literal string "null"). Canonicalizes the
@@ -868,6 +886,7 @@ fm_backend_herdr_presentation_session_lock_path() {  # <session>
   local session=$1 socket key dir hash
   [ -n "$session" ] || return 1
   socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+  fm_backend_herdr_presentation_socket_owned "$socket" || return 1
   if command -v shasum >/dev/null 2>&1; then
     hash=$(printf '%s\0%s' "$session" "$socket" | shasum -a 256 2>/dev/null | awk '{print $1}')
   elif command -v sha256sum >/dev/null 2>&1; then
