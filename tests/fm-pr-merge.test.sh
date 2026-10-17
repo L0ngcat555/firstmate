@@ -4438,6 +4438,121 @@ test_allow_missing_refused_on_forgejo() {
   pass "fm-pr-merge refuses --allow-missing on Forgejo"
 }
 
+# A verifier fixture for FM_PR_LOCAL_VERIFICATION. It logs its argv and the
+# caller-specific variable it inherits, then answers per its mode: ok echoes
+# the exact candidate, refuse exits 1, and stale names a different head.
+write_local_verifier() {
+  local path=$1 mode=$2
+  cat > "$path" <<SH
+#!/usr/bin/env bash
+printf '%s|%s\n' "\$*" "\${FM_TEST_VERIFIER_PASSTHROUGH:-}" >> "\${0}.log"
+[ "\$1" = --verify-firstmate ] || exit 2
+case $mode in
+  refuse) echo 'local evidence missing' >&2; exit 1 ;;
+  stale) jq -n --arg task "\$2" --arg url "\$3" --arg base "\$5" '{verified:true,task:\$task,url:\$url,head:"ffffffffffffffffffffffffffffffffffffffff",base_ref:\$base}' ;;
+  *) jq -n --arg task "\$2" --arg url "\$3" --arg head "\$4" --arg base "\$5" '{verified:true,task:\$task,url:\$url,head:\$head,base_ref:\$base}' ;;
+esac
+SH
+  chmod +x "$path"
+}
+
+# Run one GitHub merge of a red PR with the given local-verification config.
+# Args: case-name config-mode(listed|unlisted|relative|absent|unexecutable)
+#       verifier-mode opt-in(0|1) [extra fm-pr-merge args...]
+run_local_verification_case() {
+  local name=$1 config=$2 mode=$3 opt_in=$4 case_dir verifier
+  shift 4
+  case_dir=$(make_case "local-verification-$name")
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  write_github_red_json "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa hosted-ci
+  if [ -n "${LOCAL_CASE_VIEW_FILTER:-}" ]; then
+    jq -c "$LOCAL_CASE_VIEW_FILTER" "$case_dir/github-view.json" > "$case_dir/github-view.tmp"
+    mv "$case_dir/github-view.tmp" "$case_dir/github-view.json"
+  fi
+  verifier="$case_dir/verifier"
+  write_local_verifier "$verifier" "$mode"
+  case "$config" in
+    listed) jq -n --arg path "$verifier" '{"example/repo":$path}' ;;
+    unlisted) jq -n --arg path "$verifier" '{"example/other":$path}' ;;
+    relative) jq -n '{"example/repo":"verifier"}' ;;
+    unexecutable) chmod -x "$verifier"; jq -n --arg path "$verifier" '{"example/repo":$path}' ;;
+  esac > "$case_dir/home/config/github-local-verification.json"
+  [ "$config" != absent ] || rm -f "$case_dir/home/config/github-local-verification.json"
+  set +e
+  if [ "$opt_in" = 1 ]; then
+    FM_PR_LOCAL_VERIFICATION=1 FM_TEST_VERIFIER_PASSTHROUGH=pilot-env \
+      run_pr_merge "$case_dir" task-x1 "$@" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  else
+    run_pr_merge "$case_dir" task-x1 "$@" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  fi
+  LOCAL_CASE_RC=$?
+  set -e
+  LOCAL_CASE_DIR=$case_dir
+}
+
+test_configured_local_verification_replaces_hosted_checks() {
+  local url=https://github.com/example/repo/pull/23 label config
+
+  run_local_verification_case pass listed ok 1 "$url"
+  expect_code 0 "$LOCAL_CASE_RC" "local-verification-pass: verified local evidence must replace a red hosted check: $(cat "$LOCAL_CASE_DIR/stderr")"
+  assert_logged_gh_merge "$LOCAL_CASE_DIR" 23 example/repo --squash
+  grep -qxF -- "--verify-firstmate task-x1 $url aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa main|pilot-env" "$LOCAL_CASE_DIR/verifier.log" \
+    || fail "local-verification-pass: the verifier did not receive the candidate and the caller's environment: $(cat "$LOCAL_CASE_DIR/verifier.log")"
+  assert_no_grep 'rules/branches' "$LOCAL_CASE_DIR/gh.log" \
+    "local-verification-pass: the hosted required-check read still ran under local evidence"
+  assert_no_grep '/check-runs' "$LOCAL_CASE_DIR/gh.log" \
+    "local-verification-pass: the hosted check-producer read still ran under local evidence"
+  assert_grep 'with local evidence from' "$LOCAL_CASE_DIR/stderr" \
+    "local-verification-pass: the verification line did not name local evidence"
+
+  run_local_verification_case no-opt-in listed ok 0 "$url"
+  expect_code 1 "$LOCAL_CASE_RC" "local-verification-no-opt-in: a listed repository without the opt-in must keep hosted checks"
+  assert_grep "check 'hosted-ci' is not green" "$LOCAL_CASE_DIR/stderr" \
+    "local-verification-no-opt-in: the hosted refusal was not reported"
+  [ ! -e "$LOCAL_CASE_DIR/verifier.log" ] || fail "local-verification-no-opt-in: the verifier ran without the opt-in"
+
+  run_local_verification_case refuse listed refuse 1 "$url"
+  expect_code 1 "$LOCAL_CASE_RC" "local-verification-refuse: a refusing verifier must refuse the merge"
+  assert_grep "local verifier $LOCAL_CASE_DIR/verifier refused head" "$LOCAL_CASE_DIR/stderr" \
+    "local-verification-refuse: the refusal did not name the verifier"
+  assert_grep 'local evidence missing' "$LOCAL_CASE_DIR/stderr" \
+    "local-verification-refuse: the verifier's own reason did not reach the caller"
+  assert_no_grep 'pr merge' "$LOCAL_CASE_DIR/gh.log" "local-verification-refuse: gh pr merge ran"
+
+  run_local_verification_case stale listed stale 1 "$url"
+  expect_code 1 "$LOCAL_CASE_RC" "local-verification-stale: evidence for another head must refuse the merge"
+  assert_grep "did not verify task task-x1 at head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa on base main" "$LOCAL_CASE_DIR/stderr" \
+    "local-verification-stale: the refusal did not name the unverified candidate"
+  assert_no_grep 'pr merge' "$LOCAL_CASE_DIR/gh.log" "local-verification-stale: gh pr merge ran"
+
+  for config in unlisted relative absent unexecutable; do
+    run_local_verification_case "$config" "$config" ok 1 "$url"
+    expect_code 1 "$LOCAL_CASE_RC" "local-verification-$config: an unusable configuration must refuse"
+    assert_grep 'names no executable absolute verifier for example/repo' "$LOCAL_CASE_DIR/stderr" \
+      "local-verification-$config: the refusal did not name the configuration"
+    [ ! -s "$LOCAL_CASE_DIR/gh.log" ] || fail "local-verification-$config: the forge was read before the configuration refused"
+  done
+
+  LOCAL_CASE_VIEW_FILTER='.isDraft = true' run_local_verification_case draft listed ok 1 "$url"
+  expect_code 1 "$LOCAL_CASE_RC" "local-verification-draft: local evidence must not override the draft refusal"
+  assert_grep 'the pull request is a draft' "$LOCAL_CASE_DIR/stderr" "local-verification-draft: the draft was not named"
+  assert_no_grep 'pr merge' "$LOCAL_CASE_DIR/gh.log" "local-verification-draft: gh pr merge ran on a draft"
+
+  for label in allow-red allow-missing; do
+    run_local_verification_case "$label" listed ok 1 "$url" "--$label" hosted-ci
+    expect_code 2 "$LOCAL_CASE_RC" "local-verification-$label: a hosted-check waiver must be refused under local evidence"
+    assert_grep 'FM_PR_LOCAL_VERIFICATION replaces' "$LOCAL_CASE_DIR/stderr" \
+      "local-verification-$label: the refusal did not explain the conflict"
+  done
+
+  run_local_verification_case gitlab listed ok 1 "$MR_URL"
+  expect_code 2 "$LOCAL_CASE_RC" "local-verification-gitlab: the opt-in must refuse a GitLab merge request"
+  assert_grep 'applies only to GitHub' "$LOCAL_CASE_DIR/stderr" "local-verification-gitlab: the refusal did not name GitHub"
+  [ ! -s "$LOCAL_CASE_DIR/glab.log" ] || fail "local-verification-gitlab: glab ran under the GitHub-only opt-in"
+  pass "fm-pr-merge replaces hosted checks with configured local evidence only under the opt-in, and refuses unusable or unverified evidence"
+}
+
 test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
@@ -4494,3 +4609,4 @@ test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
 test_allow_red_refused_on_forgejo
 test_allow_missing_refused_on_forgejo
+test_configured_local_verification_replaces_hosted_checks

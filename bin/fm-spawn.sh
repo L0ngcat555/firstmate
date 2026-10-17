@@ -236,7 +236,14 @@
 #   shape, plan mode off, prewalk off, and the non-interactive usage-reserve
 #   policy for the one session only (--auto-approve alone owns approval); the
 #   captain's own ~/.omp/agent/config.yml (model roles, providers, theme) is
-#   never written.
+#   never written. A home whose omp model roles need a private extension, such
+#   as one registering a model provider, lists its absolute path in the optional
+#   gitignored config/omp-worker-extensions, one per line with blank and #
+#   comment lines ignored; every omp launch then loads each listed file with its
+#   own -e before the busy-state extension. A worker's --cwd keeps omp's
+#   auto-discovery from ever reaching the home's own .omp/extensions/, so this
+#   list is the only way such a file loads. An unreadable list, a relative
+#   entry, or an entry that is not a readable regular file refuses the spawn.
 #   A model written as <provider>/<id> is validated against `omp models --json`
 #   only when that provider appears in the listing; a provider absent from the
 #   listing (an extension-registered provider such as claude-bridge, which omp
@@ -2324,7 +2331,7 @@ launch_template() {
   # session_stop continuation. The busy extension is the exception: it lives
   # outside the home, so discovery never sees it, and -e is the only load.
   omp)
-    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ --auto-approve --cwd __WORKTREE__ __MODELFLAG____EFFORTFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ --auto-approve --cwd __WORKTREE__ __MODELFLAG____EFFORTFLAG____OMPEXTRAEXT__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     ;;
   # agy (Antigravity CLI): --prompt-interactive "<brief>" starts the supervised
   # interactive session and auto-submits it, so the brief rides the launch
@@ -2612,6 +2619,32 @@ omp)
     echo "error: omp worker posture overlay missing at $OMP_WORKER_CFG; a worker launched without it can park on the captain's own approval or plan-mode settings" >&2
     exit 1
   }
+  # config/omp-worker-extensions: the header above owns the contract.
+  OMP_EXTRA_EXTFLAGS=
+  if ! OMP_EXTRA_EXT_PRESENT=$(fm_config_source_present "$CONFIG/omp-worker-extensions"); then
+    exit 1
+  fi
+  if [ "$OMP_EXTRA_EXT_PRESENT" = 1 ]; then
+    if [ ! -f "$CONFIG/omp-worker-extensions" ] || [ ! -r "$CONFIG/omp-worker-extensions" ]; then
+      echo "error: config/omp-worker-extensions must be a readable regular file" >&2
+      exit 1
+    fi
+    while IFS= read -r omp_extra_ext || [ -n "$omp_extra_ext" ]; do
+      case "$omp_extra_ext" in
+        ''|'#'*) continue ;;
+        /*) ;;
+        *)
+          echo "error: config/omp-worker-extensions entry is not an absolute path: $omp_extra_ext" >&2
+          exit 1
+          ;;
+      esac
+      if [ ! -f "$omp_extra_ext" ] || [ ! -r "$omp_extra_ext" ]; then
+        echo "error: omp worker extension $omp_extra_ext named in config/omp-worker-extensions is not a readable regular file" >&2
+        exit 1
+      fi
+      OMP_EXTRA_EXTFLAGS="$OMP_EXTRA_EXTFLAGS-e $(shell_quote "$omp_extra_ext") "
+    done < "$CONFIG/omp-worker-extensions"
+  fi
   ;;
 agy)
   AGY_BIN=$(resolve_pi_executable agy) || {
@@ -5560,7 +5593,10 @@ case "$HARNESS" in
 pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
-omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
+omp)
+  LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"}
+  LAUNCH=${LAUNCH//__OMPEXTRAEXT__/"$OMP_EXTRA_EXTFLAGS"}
+  ;;
 devin)
   LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "$DEVIN_BIN")"}
   LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}

@@ -90,6 +90,22 @@
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
 #
+# A home may replace the hosted-check evidence above with local evidence for a
+# GitHub repository it lists in config/github-local-verification.json, and only
+# for a caller that sets FM_PR_LOCAL_VERIFICATION=1; without that opt-in the
+# hosted-check path is unchanged, even for a listed repository.
+# docs/configuration.md owns the file's schema and the verifier's invocation,
+# result, and environment contract. Under the opt-in, the check rollup, the
+# required-context and producer reads, and --allow-red and --allow-missing are
+# replaced by one run of the repository's configured verifier per verification
+# read, whose result must name this exact task, URL, live head, and base
+# branch. Every other condition here is unchanged: open, not a draft,
+# mergeable, free of conflicts, captain holds, merge authority, the
+# --match-head-commit binding, and the read-back outcome. The opt-in is refused
+# for an unlisted repository, an unusable verifier path, a GitLab or Forgejo
+# URL, and together with --allow-red or --allow-missing, which it would
+# otherwise silently drop.
+#
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
@@ -292,6 +308,29 @@ if [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
       exit 2
       ;;
   esac
+fi
+
+# config/github-local-verification.json, selected by FM_PR_LOCAL_VERIFICATION=1
+# as the header above describes.
+FM_PR_LOCAL_VERIFIER=
+if [ "${FM_PR_LOCAL_VERIFICATION:-}" = 1 ]; then
+  if [ "$PROVIDER" != github ]; then
+    echo "error: FM_PR_LOCAL_VERIFICATION applies only to GitHub pull requests" >&2
+    exit 2
+  fi
+  if [ "${#ALLOW_RED[@]}" -gt 0 ] || [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
+    echo "error: --allow-red and --allow-missing waive hosted checks, which FM_PR_LOCAL_VERIFICATION replaces with local evidence" >&2
+    exit 2
+  fi
+  local_verification_config="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/github-local-verification.json"
+  if ! command -v jq >/dev/null 2>&1 \
+    || ! FM_PR_LOCAL_VERIFIER=$(jq -er --arg repo "$PR_OWNER/$PR_REPO" \
+      'if type == "object" then .[$repo] | select(type == "string" and startswith("/")) else error("not an object") end' \
+      "$local_verification_config" 2>/dev/null) \
+    || [ ! -f "$FM_PR_LOCAL_VERIFIER" ] || [ ! -x "$FM_PR_LOCAL_VERIFIER" ]; then
+    echo "error: FM_PR_LOCAL_VERIFICATION is set, but $local_verification_config names no executable absolute verifier for $PR_OWNER/$PR_REPO; nothing was merged" >&2
+    exit 1
+  fi
 fi
 
 caller_has_merge_method() {
@@ -964,12 +1003,95 @@ github_required_checks_missing() {
   ' 2>/dev/null || return 1
 }
 
+# The hosted-check conditions of github_verify_mergeable: every unwaived check
+# green and every unwaived required check reported at the live head. Appends to
+# the caller's refusals, uncovered, and unreported, and returns 1 only when the
+# check rollup itself cannot be read.
+github_hosted_check_refusals() {  # <pr-json> <live-head> <base>
+  local json=$1 live_head=$2 base=$3 red name covered check missing producers runs line
+  if ! red=$(github_checks_not_green "$json"); then
+    echo "error: could not read the GitHub pull request state before merging" >&2
+    return 1
+  fi
+
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    covered=0
+    if [ "${#ALLOW_RED[@]}" -gt 0 ]; then
+      for check in "${ALLOW_RED[@]}"; do
+        [ "$check" = "$name" ] && covered=1
+      done
+    fi
+    [ "$covered" -eq 1 ] || {
+      refusals="$refusals  - check '$name' is not green
+"
+      uncovered="${uncovered:+$uncovered, }$name"
+    }
+  done <<EOF
+$red
+EOF
+
+  if ! github_read_required_contexts "$base"; then
+    while IFS= read -r line; do
+      refusals="$refusals  - $line, so a required check that has not reported cannot be ruled out
+"
+    done <<EOF
+$FM_PR_GITHUB_REQUIRED_ERROR
+EOF
+  fi
+  producers='[]'
+  if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
+    if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
+      || [ -z "$runs" ] \
+      || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" '
+        [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
+          | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
+            then . else error("invalid check producer") end ]' 2>/dev/null); then
+      producers='[]'
+      refusals="$refusals  - required check producers at head $live_head could not be read
+"
+    fi
+  fi
+  if ! missing=$(github_required_checks_missing "$json" "$FM_PR_GITHUB_REQUIRED" "$producers"); then
+    refusals="$refusals  - the GitHub pull request check rollup could not be read
+"
+  else
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "${ALLOW_MISSING[0]}" = "$name" ] && continue
+      refusals="$refusals  - required check '$name' has not reported at head $live_head
+"
+      unreported="${unreported:+$unreported, }$name"
+    done <<EOF
+$missing
+EOF
+  fi
+}
+
+# The local-evidence replacement for github_hosted_check_refusals under
+# FM_PR_LOCAL_VERIFICATION, appending to the caller's refusals. The verifier's
+# stderr passes through so its own reason reaches the caller; its stdout must be
+# exactly one JSON object verifying this task, URL, head, and base.
+github_local_evidence_refusals() {  # <live-head> <base>
+  local live_head=$1 base=$2 evidence
+  if ! evidence=$("$FM_PR_LOCAL_VERIFIER" --verify-firstmate "$ID" "$URL" "$live_head" "$base" </dev/null); then
+    refusals="$refusals  - local verifier $FM_PR_LOCAL_VERIFIER refused head $live_head
+"
+    return 0
+  fi
+  printf '%s' "$evidence" | jq -se --arg task "$ID" --arg url "$URL" --arg head "$live_head" --arg base "$base" '
+    length == 1 and (.[0] | type == "object" and .verified == true
+      and .task == $task and .url == $url and .head == $head and .base_ref == $base)' >/dev/null 2>&1 \
+    || refusals="$refusals  - local verifier $FM_PR_LOCAL_VERIFIER did not verify task $ID at head $live_head on base $base
+"
+}
+
 # Pre-merge conditions from a live PR view, base requirements, and head producers.
 # Sets FM_PR_MERGE_HEAD to the verified head on success. Returns 3, rather than
 # the usual 1, when mergeable=UNKNOWN is the only failing condition, so the
 # caller can retry a still-computing mergeability read instead of refusing.
 github_verify_mergeable() {
-  local json fields line red name covered missing unreported producers runs
+  local json fields line uncovered='' unreported=''
   local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
@@ -1015,10 +1137,6 @@ FIELDS
     echo "error: could not read the GitHub pull request head commit before merging" >&2
     return 1
   fi
-  if ! red=$(github_checks_not_green "$json"); then
-    echo "error: could not read the GitHub pull request state before merging" >&2
-    return 1
-  fi
 
   case "$state" in
     [oO][pP][eE][nN]) ;;
@@ -1037,59 +1155,10 @@ FIELDS
     || refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
 "
 
-  uncovered=''
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    covered=0
-    if [ "${#ALLOW_RED[@]}" -gt 0 ]; then
-      for check in "${ALLOW_RED[@]}"; do
-        [ "$check" = "$name" ] && covered=1
-      done
-    fi
-    [ "$covered" -eq 1 ] || {
-      refusals="$refusals  - check '$name' is not green
-"
-      uncovered="${uncovered:+$uncovered, }$name"
-    }
-  done <<EOF
-$red
-EOF
-
-  unreported=''
-  if ! github_read_required_contexts "$base"; then
-    while IFS= read -r line; do
-      refusals="$refusals  - $line, so a required check that has not reported cannot be ruled out
-"
-    done <<EOF
-$FM_PR_GITHUB_REQUIRED_ERROR
-EOF
-  fi
-  producers='[]'
-  if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
-    if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
-      || [ -z "$runs" ] \
-      || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" '
-        [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
-          | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
-            then . else error("invalid check producer") end ]' 2>/dev/null); then
-      producers='[]'
-      refusals="$refusals  - required check producers at head $live_head could not be read
-"
-    fi
-  fi
-  if ! missing=$(github_required_checks_missing "$json" "$FM_PR_GITHUB_REQUIRED" "$producers"); then
-    refusals="$refusals  - the GitHub pull request check rollup could not be read
-"
-  else
-    while IFS= read -r name; do
-      [ -n "$name" ] || continue
-      [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "${ALLOW_MISSING[0]}" = "$name" ] && continue
-      refusals="$refusals  - required check '$name' has not reported at head $live_head
-"
-      unreported="${unreported:+$unreported, }$name"
-    done <<EOF
-$missing
-EOF
+  if [ -n "$FM_PR_LOCAL_VERIFIER" ]; then
+    github_local_evidence_refusals "$live_head" "$base"
+  elif ! github_hosted_check_refusals "$json" "$live_head" "$base"; then
+    return 1
   fi
 
   if [ -n "$mergeable_refusal" ]; then
@@ -1106,8 +1175,13 @@ EOF
     [ -z "$unreported" ] || printf 'error: these required checks have not reported: %s\n' "$unreported" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with every unwaived required check reported and every unwaived check green at head %s\n' \
-    "$URL" "$live_head" >&2
+  if [ -n "$FM_PR_LOCAL_VERIFIER" ]; then
+    printf 'verified: %s is open and mergeable, with local evidence from %s at head %s\n' \
+      "$URL" "$FM_PR_LOCAL_VERIFIER" "$live_head" >&2
+  else
+    printf 'verified: %s is open and mergeable, with every unwaived required check reported and every unwaived check green at head %s\n' \
+      "$URL" "$live_head" >&2
+  fi
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
 }
