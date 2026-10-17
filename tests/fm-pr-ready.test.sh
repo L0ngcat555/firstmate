@@ -12,6 +12,8 @@ cat > "$TMP/bin/gh" <<'GH'
 #!/usr/bin/env python3
 import json, os, sys
 a=sys.argv[1:]; mode=os.environ.get('CASE','green'); head='a'*40
+if os.environ.get('GH_CALL_LOG'):
+    with open(os.environ['GH_CALL_LOG'],'a') as log: log.write(json.dumps(a)+'\n')
 if '--required' in a:
     if mode == 'required-pending': print('quality\tpending\t0\turl'); sys.exit(8)
     if mode == 'required-error': print('HTTP 403'); sys.exit(1)
@@ -44,4 +46,16 @@ fm_watch_notice_record ci-green fixture "$green"
 if fm_watch_notice_changed ci-green fixture "$green"; then exit 1; fi
 fm_watch_notice_changed ci-green fixture "${green/a/b}"
 fm_watch_notice_changed ci-green fixture "$green changed-check"
-echo 'PASS: pending/failure/unknown/race stay silent; success, absent protection, merge and once-per-candidate wake'
+# A repository listed for local verification never polls hosted checks and
+# emits only merged; an unlisted one keeps the hosted hint.
+mkdir -p "$TMP/home/config"
+printf '{"acme/repo":"/configured/verifier"}\n' > "$TMP/home/config/github-local-verification.json"
+export GH_CALL_LOG="$TMP/gh-calls"
+[ -z "$(FM_HOME="$TMP/home" poll green)" ] || { echo 'locally verified PR emitted a hosted CI hint' >&2; exit 1; }
+[ "$(wc -l < "$GH_CALL_LOG")" -eq 1 ] || { echo 'locally verified PR polled hosted checks' >&2; exit 1; }
+[ "$(FM_HOME="$TMP/home" poll merged)" = merged ] || { echo 'locally verified PR lost its merge notification' >&2; exit 1; }
+[ -z "$(FM_HOME=/nonexistent FM_CONFIG_OVERRIDE="$TMP/home/config" poll green)" ] \
+  || { echo 'FM_CONFIG_OVERRIDE did not select the local-verification list' >&2; exit 1; }
+printf '{"acme/other":"/configured/verifier"}\n' > "$TMP/home/config/github-local-verification.json"
+[ "$(FM_HOME="$TMP/home" poll green)" = "$green" ] || { echo 'an unlisted repository lost its hosted CI hint' >&2; exit 1; }
+echo 'PASS: pending/failure/unknown/race stay silent; success, absent protection, merge, once-per-candidate wake, and local-verification silence'

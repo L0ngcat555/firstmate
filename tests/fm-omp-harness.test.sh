@@ -180,6 +180,37 @@ test_spawn_launch_line_and_worker_wiring() {
   pass "fm-spawn: the omp launch line clears markers, pins posture, and wires the state-resident extension"
 }
 
+test_spawn_loads_home_listed_worker_extensions() {
+  local rec id=omp-extra-ext-q6 out status launch state ext_a ext_b entry
+  rec=$(make_spawn_case extra-ext omp "$id")
+  read_case_record "$rec"
+  state="$HOME_DIR/state"
+  ext_a="$CASE_DIR/private ext/provider.ts"
+  ext_b="$CASE_DIR/second.ts"
+  mkdir -p "${ext_a%/*}"
+  : > "$ext_a"
+  : > "$ext_b"
+  printf '# private provider\n\n%s\n%s\n' "$ext_a" "$ext_b" > "$HOME_DIR/config/omp-worker-extensions"
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model openai-codex/gpt-6-astra)
+  status=$?
+  expect_code 0 "$status" "omp spawn with listed worker extensions should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'openai-codex/gpt-6-astra' -e '$ext_a' -e '$ext_b' -e '$state/$id.omp-ext.ts' \"\$(" \
+    "omp launch did not load every listed extension, in order, before the busy extension and the one positional brief"
+
+  for entry in relative/provider.ts "$CASE_DIR/absent.ts"; do
+    rec=$(make_spawn_case "extra-ext-bad-${entry##*/}" omp "omp-extra-bad-q7")
+    read_case_record "$rec"
+    printf '%s\n' "$entry" > "$HOME_DIR/config/omp-worker-extensions"
+    out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" omp-extra-bad-q7 "$PROJ_DIR" --harness omp)
+    status=$?
+    expect_code 1 "$status" "an unusable listed extension '$entry' must refuse the spawn: $out"
+    assert_contains "$out" "config/omp-worker-extensions" "the refusal did not name the extension list: $out"
+    [ ! -s "$LAUNCH_LOG" ] || fail "an unusable listed extension '$entry' still launched omp: $(cat "$LAUNCH_LOG")"
+  done
+  pass "fm-spawn: omp launches load home-listed worker extensions and refuse unusable entries"
+}
+
 test_spawn_model_validation_scoped_to_listed_providers() {
   local rec id out status
   rec=$(make_spawn_case model-refused omp omp-model-refused-q2)
@@ -864,6 +895,7 @@ EOF
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
+test_spawn_loads_home_listed_worker_extensions
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery
 test_secondmate_config_pinned_model_is_validated

@@ -886,7 +886,7 @@ Its `remove` action excises only the marker-delimited Firstmate region and remov
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree, plus the parent home's `state/<id>.pi-ext.ts` busy extension.
 Pi-family secondmates can start unattended in Firstmate-seeded homes without accepting project trust manually; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the capability requirement, session-only approval scope, and older-version fallback, with [regression evidence](verification/runtime-backends.md#pi-seeded-secondmate-project-trust).
 
-For omp secondmate launches, `fm-spawn.sh` names only the parent home's `state/<id>.omp-ext.ts` busy extension with `-e`: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch also carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
+For omp secondmate launches, `fm-spawn.sh` names only the parent home's `state/<id>.omp-ext.ts` busy extension with `-e`: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch also carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns, plus any [omp worker extensions](#omp-worker-extensions-configomp-worker-extensions) the home lists.
 
 For a Claude secondmate, `fm-spawn.sh` writes the busy hooks into the parent home's `state/<id>.claude-settings.json` and passes that file as Claude Code's one `--settings` value.
 The same file carries `feedbackDrafts` and, unless `config/keep-ai-trailers` is present, the attribution policy every other Claude launch puts in its inline `--settings` JSON.
@@ -1016,6 +1016,20 @@ Pins are not inherited into secondmate homes: a local secondmate agent launches 
 A remote secondmate is launched on its host from its own home's configuration, so create the file in that remote home.
 
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
+
+## omp worker extensions (config/omp-worker-extensions)
+
+The optional local, gitignored `config/omp-worker-extensions` lists home-specific omp extensions that every omp worker, scout, and secondmate launch must load, such as an extension that registers a private model provider named by the home's omp model roles.
+A Firstmate-launched omp session runs with `--cwd` inside its own worktree or home, so omp's auto-discovery never reaches the launching home's `.omp/extensions/`, and a model whose provider only such an extension registers is otherwise reported as not found.
+
+Write one absolute extension path per line; blank lines and lines beginning with `#` are ignored.
+`fm-spawn.sh` passes each listed file with its own `-e`, in file order, before the per-task busy extension, and leaves the launch unchanged when the file is absent.
+Do not list a file that omp already auto-discovers from the launch directory, because a file named both ways loads twice.
+
+A list that is not a readable regular file, a relative entry, or an entry that is not a readable regular file refuses the spawn before the worker starts.
+Changes apply to subsequent launches and relaunches.
+
+The list is not inherited into secondmate homes: a local secondmate agent launches with the launching home's list, while the secondmate's own workers read the secondmate home's file.
 
 ## Lavish server address (config/lavish-axi-host)
 
@@ -1498,6 +1512,32 @@ The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) re
 A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered for that project's host (`tea login add`); the login is matched to a PR's host automatically, never configured per project.
 A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
 [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
+
+## GitHub local verification (config/github-local-verification.json)
+
+The optional local, gitignored `config/github-local-verification.json` lets a home merge pull requests for named GitHub repositories on local evidence instead of hosted GitHub checks, for example a repository whose hosted Actions are disabled by policy.
+It is one JSON object mapping `owner/repo` to the absolute path of an executable verifier:
+
+```json
+{"example-owner/example-repo": "/absolute/path/to/verifier"}
+```
+
+While a repository is listed, `bin/fm-pr-poll.sh` reports only its merges and never polls its hosted checks, so its PRs raise no hosted readiness notification.
+
+A merge uses local evidence only when its caller runs `bin/fm-pr-merge.sh` with `FM_PR_LOCAL_VERIFICATION=1`; without that variable a listed repository still merges through the hosted-check path.
+Under the opt-in, `fm-pr-merge.sh` runs the verifier once per verification read, with stdin closed, as:
+
+```text
+<verifier> --verify-firstmate <task-id> <pr-url> <live-head-sha> <base-branch>
+```
+
+`<pr-url>` is the canonical `https://github.com/<owner>/<repo>/pull/<number>` form and `<live-head-sha>` is the head read live at that moment.
+The verifier must exit 0 and print exactly one JSON object whose `verified` is `true` and whose `task`, `url`, `head`, and `base_ref` equal those four arguments; other fields are ignored.
+A nonzero exit, any other output, or an unlisted repository, relative path, or non-executable verifier refuses the merge, and the verifier's stderr reaches the caller unchanged.
+
+The verifier inherits `fm-pr-merge.sh`'s environment unchanged, so a merge wrapper can bind its own candidate variables (such as `PILOT_MERGE_*`) for the verifier to check; every forge call resolves `gh` from `PATH`, so the same wrapper may also put a guarding `gh` first on `PATH`.
+Local evidence replaces only the hosted check rollup and required-check reads: the open, non-draft, mergeable, and conflict-free reads, captain holds, merge authority, the `--match-head-commit` binding, and the read-back outcome still apply, and forge branch protections still bind the merge itself.
+The opt-in is refused for GitLab and Forgejo URLs and together with `--allow-red` or `--allow-missing`; [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s header owns the merge-path rules.
 
 ## Watched tool updates (config/watched-tools.json)
 

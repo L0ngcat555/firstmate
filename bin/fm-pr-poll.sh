@@ -6,6 +6,10 @@
 # stays silent otherwise, including on every error, so a failed lookup can
 # never be read as a merge. ci-green is only a scheduling hint: the merge owner
 # still rechecks required contexts, candidate freshness, reviews and authority.
+# A GitHub repository the home lists in config/github-local-verification.json
+# (docs/configuration.md) emits only merged: its merge evidence is local, so
+# hosted checks are never polled for it. The watcher passes FM_HOME and
+# FM_CONFIG_OVERRIDE so this script can find that list.
 # The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
@@ -77,6 +81,11 @@ case "$provider" in
     fi
     [ "$state" = OPEN ] || exit 0
     command -v jq >/dev/null 2>&1 || exit 0
+    config_dir=${FM_CONFIG_OVERRIDE:-${FM_HOME:+$FM_HOME/config}}
+    if [ -n "$config_dir" ] && jq -e --arg repo "$owner/$repo" 'type == "object" and has($repo)' \
+      "$config_dir/github-local-verification.json" >/dev/null 2>&1; then
+      exit 0
+    fi
     snapshot=$(gh pr view "$url" --json state,headRefOid,statusCheckRollup 2>/dev/null) || exit 0
     # Be conservative about pending, failed, skipped, unknown and empty data.
     # A check rerun with an older failure may delay this hint, never authorize it.
