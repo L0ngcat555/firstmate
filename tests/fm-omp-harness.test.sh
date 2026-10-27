@@ -211,6 +211,36 @@ test_spawn_loads_home_listed_worker_extensions() {
   pass "fm-spawn: omp launches load home-listed worker extensions and refuse unusable entries"
 }
 
+test_spawn_passes_home_listed_worker_config() {
+  local rec id=omp-extra-cfg-q8 out status launch cfg_a cfg_b entry
+  rec=$(make_spawn_case extra-cfg omp "$id")
+  read_case_record "$rec"
+  cfg_a="$CASE_DIR/private cfg/fallback.yml"
+  cfg_b="$CASE_DIR/second.yml"
+  mkdir -p "${cfg_a%/*}"
+  : > "$cfg_a"
+  : > "$cfg_b"
+  printf '# usage-limit fallback\n\n%s\n%s\n' "$cfg_a" "$cfg_b" > "$HOME_DIR/config/omp-worker-config"
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model openai-codex/gpt-6-astra)
+  status=$?
+  expect_code 0 "$status" "omp spawn with listed worker config should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --config '$cfg_a' --config '$cfg_b' --auto-approve --cwd '$WT_DIR'" \
+    "omp launch did not pass every listed config overlay, in order, after the posture overlay"
+
+  for entry in relative/fallback.yml "$CASE_DIR/absent.yml"; do
+    rec=$(make_spawn_case "extra-cfg-bad-${entry##*/}" omp "omp-extra-cfg-bad-q9")
+    read_case_record "$rec"
+    printf '%s\n' "$entry" > "$HOME_DIR/config/omp-worker-config"
+    out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" omp-extra-cfg-bad-q9 "$PROJ_DIR" --harness omp)
+    status=$?
+    expect_code 1 "$status" "an unusable listed config '$entry' must refuse the spawn: $out"
+    assert_contains "$out" "config/omp-worker-config" "the refusal did not name the config list: $out"
+    [ ! -s "$LAUNCH_LOG" ] || fail "an unusable listed config '$entry' still launched omp: $(cat "$LAUNCH_LOG")"
+  done
+  pass "fm-spawn: omp launches pass home-listed config overlays and refuse unusable entries"
+}
+
 test_spawn_model_validation_scoped_to_listed_providers() {
   local rec id out status
   rec=$(make_spawn_case model-refused omp omp-model-refused-q2)
@@ -896,6 +926,7 @@ test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_loads_home_listed_worker_extensions
+test_spawn_passes_home_listed_worker_config
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery
 test_secondmate_config_pinned_model_is_validated
