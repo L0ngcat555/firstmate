@@ -123,6 +123,12 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+#   check: captain inbox note <id> (unread <seconds>s);
+#                          a captain note queued by bin/fm-inbox.sh is still in
+#                          state/inbox and nothing has drained it; the plural form
+#                          lists every due note, oldest first. Re-rings at most
+#                          once per FM_INBOX_RING_INTERVAL while the record stays
+#                          pending, and goes quiet the moment it is handled
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -306,6 +312,10 @@ esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+# How long a surfaced captain inbox note stays quiet before it re-rings. The note
+# record is durable and the row keeps its place in the queue until the model
+# drains it, so this only bounds how often an undrained note repeats itself.
+INBOX_RING_INTERVAL=${FM_INBOX_RING_INTERVAL:-900}
 CLEANUP_LOCK_BOUND=${FM_WATCHER_CLEANUP_LOCK_BOUND:-2}  # seconds EXIT cleanup may
                                       # wait on the downtime-marker lock; a live
                                       # foreign holder must not strand a TERM'd
@@ -2091,6 +2101,73 @@ procevent_surface_after_output() {
   return "$status"
 }
 
+# A captain inbox note is announced as ONE `check` wake row keyed `inbox:<id>`
+# (bin/fm-inbox.sh), and until this surface existed nothing rang on it: the only
+# other queue reader filters to `procevent:*`, the arm owner parses this
+# watcher's stdout, and the queue itself is consumed by bin/fm-wake-drain.sh,
+# which only the model runs. A note therefore needed a turn it could not cause,
+# and on an idle fleet the heartbeat backstop - the only remaining turn source -
+# absorbed itself as benign because it classifies task and status evidence and
+# never looks at state/inbox/*.note. Observed 2026-10-27: two captain notes waited
+# 3 h 38 min and 2 h 59 min, and a fresh note sat unread until an operator typed
+# into the pane. Surface the note, but only while its record is still pending:
+# the note file is the truth, so a handled or retired note goes quiet even if its
+# row outlives the acknowledgement.
+inbox_note_surface_marker() {  # <id>
+  printf '%s/.seen-inbox-%s' "$STATE" "$1"
+}
+
+inbox_surface_after_output() {
+  local output_status=$1 key now status=0
+  [ "$output_status" -eq 0 ] || return 0
+  fm_epoch_seconds_to now
+  for key in $INBOX_SURFACED; do
+    if ! printf '%s\n' "$now" > "$(inbox_note_surface_marker "${key#inbox:}")"; then
+      status=1
+    fi
+  done
+  return "$status"
+}
+
+# One wake per cycle names every note that is due, oldest first. A row whose note
+# is gone is left alone (the drain retires it); a row surfaced inside
+# FM_INBOX_RING_INTERVAL stays quiet, so a note the model has not drained yet
+# re-rings on a bounded cadence instead of either spinning every poll or falling
+# silent for hours.
+inbox_surface_queued() {
+  local key id note mtime age now_s marker last due_count=0 due=''
+  INBOX_SURFACED=
+  [ -s "$FM_WAKE_QUEUE" ] || return 0
+  fm_epoch_seconds_to now_s
+  while IFS= read -r key; do
+    case "$key" in inbox:*) ;; *) continue ;; esac
+    id=${key#inbox:}
+    note="$STATE/inbox/$id.note"
+    [ -f "$note" ] || continue
+    mtime=$(stat_mtime "$note" 2>/dev/null || true)
+    case "$mtime" in ''|*[!0-9]*) mtime=$now_s ;; esac
+    age=$(( now_s - mtime ))
+    [ "$age" -ge 0 ] || age=0
+    marker=$(inbox_note_surface_marker "$id")
+    if [ -f "$marker" ]; then
+      last=$(cat "$marker" 2>/dev/null || printf '0')
+      case "$last" in ''|*[!0-9]*) last=0 ;; esac
+      [ $(( now_s - last )) -ge "$INBOX_RING_INTERVAL" ] || continue
+    fi
+    INBOX_SURFACED="$INBOX_SURFACED $key"
+    due_count=$(( due_count + 1 ))
+    due="$due $id (unread ${age}s);"
+  done < <(fm_wake_queued_keys check)
+  [ "$due_count" -gt 0 ] || return 0
+  # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+  FM_WAKE_POST_OUTPUT_ACTION=inbox_surface_after_output
+  if [ "$due_count" -eq 1 ]; then
+    wake "check: captain inbox note$due"
+  else
+    wake "check: captain inbox notes unread:$due"
+  fi
+}
+
 procevent_surface_queued() {
   local key reason captured="" stranded="" unstarted=""
   PROCEVENT_SURFACED=
@@ -2815,6 +2892,10 @@ while :; do
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.
   resurface_after_downtime
+
+  # Captain input has no other ringer: deliver a queued inbox note here, after any
+  # downtime-resurface context has had its turn, so an idle fleet still rings.
+  inbox_surface_queued
 
   # The existing poll loop also owns the bounded inactive-outcome cadence.
   # This is mechanical and silent unless a durable terminal-outcome obligation
