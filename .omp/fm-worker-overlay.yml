@@ -25,3 +25,10 @@ retry:
   # `confirm` pops a dialog when a usage window runs low; `auto` lets omp fall
   # through the captain's own fallback chain without a keystroke.
   usageReservePolicy: auto
+  # A provider usage limit (e.g. a 5h window) states a reset far beyond
+  # retry.maxDelayMs, so by default omp ends the turn on the error and an
+  # unattended session sits idle until someone nudges it. Sleep until the
+  # provider-stated reset instead and continue the same turn. omp only waits on
+  # authoritative reset timing (a parsed retry-after or a complete usage report),
+  # so a permanent error such as an exhausted balance still surfaces.
+  waitForUsageReset: true

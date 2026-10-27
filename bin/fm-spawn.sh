@@ -244,6 +244,12 @@
 #   auto-discovery from ever reaching the home's own .omp/extensions/, so this
 #   list is the only way such a file loads. An unreadable list, a relative
 #   entry, or an entry that is not a readable regular file refuses the spawn.
+#   The optional gitignored config/omp-worker-config lists extra omp config
+#   overlays the same way (absolute paths, blank and # lines ignored); every
+#   omp launch passes each with its own --config after the posture overlay, so
+#   a later file wins on a conflicting key. A home uses it for settings that
+#   come from its own policy, such as a usage-limit fallback chain, and the
+#   same refusals apply.
 #   A model written as <provider>/<id> is validated against `omp models --json`
 #   only when that provider appears in the listing; a provider absent from the
 #   listing (an extension-registered provider such as claude-bridge, which omp
@@ -451,6 +457,7 @@
 #                  auto-discovery cannot load it a second time; a secondmate names
 #                  this -e and still does not name its auto-discovered primary extensions)
 #     __OMPWORKERCFG__ absolute path to the tracked .omp/fm-worker-overlay.yml posture overlay
+#     __OMPEXTRACFG__ one `--config <path> ` per config/omp-worker-config entry, or empty
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __BRIEFDOORBELL__ quoted printable doorbell naming the launch-brief record this
 #                  script published into the receiving home's operational inbox
@@ -2331,7 +2338,7 @@ launch_template() {
   # session_stop continuation. The busy extension is the exception: it lives
   # outside the home, so discovery never sees it, and -e is the only load.
   omp)
-    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ --auto-approve --cwd __WORKTREE__ __MODELFLAG____EFFORTFLAG____OMPEXTRAEXT__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ __OMPEXTRACFG__--auto-approve --cwd __WORKTREE__ __MODELFLAG____EFFORTFLAG____OMPEXTRAEXT__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     ;;
   # agy (Antigravity CLI): --prompt-interactive "<brief>" starts the supervised
   # interactive session and auto-submits it, so the brief rides the launch
@@ -2644,6 +2651,32 @@ omp)
       fi
       OMP_EXTRA_EXTFLAGS="$OMP_EXTRA_EXTFLAGS-e $(shell_quote "$omp_extra_ext") "
     done < "$CONFIG/omp-worker-extensions"
+  fi
+  # config/omp-worker-config: the header above owns the contract.
+  OMP_EXTRA_CFGFLAGS=
+  if ! OMP_EXTRA_CFG_PRESENT=$(fm_config_source_present "$CONFIG/omp-worker-config"); then
+    exit 1
+  fi
+  if [ "$OMP_EXTRA_CFG_PRESENT" = 1 ]; then
+    if [ ! -f "$CONFIG/omp-worker-config" ] || [ ! -r "$CONFIG/omp-worker-config" ]; then
+      echo "error: config/omp-worker-config must be a readable regular file" >&2
+      exit 1
+    fi
+    while IFS= read -r omp_extra_cfg || [ -n "$omp_extra_cfg" ]; do
+      case "$omp_extra_cfg" in
+        ''|'#'*) continue ;;
+        /*) ;;
+        *)
+          echo "error: config/omp-worker-config entry is not an absolute path: $omp_extra_cfg" >&2
+          exit 1
+          ;;
+      esac
+      if [ ! -f "$omp_extra_cfg" ] || [ ! -r "$omp_extra_cfg" ]; then
+        echo "error: omp config overlay $omp_extra_cfg named in config/omp-worker-config is not a readable regular file" >&2
+        exit 1
+      fi
+      OMP_EXTRA_CFGFLAGS="$OMP_EXTRA_CFGFLAGS--config $(shell_quote "$omp_extra_cfg") "
+    done < "$CONFIG/omp-worker-config"
   fi
   ;;
 agy)
@@ -5596,6 +5629,7 @@ gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemi
 omp)
   LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"}
   LAUNCH=${LAUNCH//__OMPEXTRAEXT__/"$OMP_EXTRA_EXTFLAGS"}
+  LAUNCH=${LAUNCH//__OMPEXTRACFG__/"$OMP_EXTRA_CFGFLAGS"}
   ;;
 devin)
   LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "$DEVIN_BIN")"}

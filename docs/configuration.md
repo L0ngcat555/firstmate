@@ -1031,6 +1031,16 @@ Changes apply to subsequent launches and relaunches.
 
 The list is not inherited into secondmate homes: a local secondmate agent launches with the launching home's list, while the secondmate's own workers read the secondmate home's file.
 
+## omp worker config (config/omp-worker-config)
+
+The optional local, gitignored `config/omp-worker-config` lists extra omp config overlays that every omp worker, scout, and secondmate launch passes, for settings a home derives from its own policy rather than the tracked posture overlay, such as a usage-limit fallback chain (`retry.fallbackChains`).
+
+Write one absolute overlay path per line; blank lines and lines beginning with `#` are ignored.
+`fm-spawn.sh` passes each listed file with its own `--config`, in file order, after `.omp/fm-worker-overlay.yml`; omp deep-merges overlays in order, so a later file wins on a conflicting key.
+The launch is unchanged when the file is absent, and the supervisor's own launch never reads it.
+The same refusals as the extension list apply: an unreadable list, a relative entry, or an entry that is not a readable regular file refuses the spawn before the worker starts.
+Changes apply to subsequent launches and relaunches, and the list is not inherited into secondmate homes.
+
 ## Lavish server address (config/lavish-axi-host)
 
 The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.
