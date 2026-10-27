@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "repo": "acme/widgets",
+  "github_operator": "acme",
+  "max_active": 4
+}

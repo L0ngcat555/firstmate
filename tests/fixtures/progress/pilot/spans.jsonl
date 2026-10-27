@@ -1,0 +1,6 @@
+{"at": "2026-10-04T09:10:00Z", "event": "start", "span": "s-201-impl", "issue": 201, "phase": "implementation", "category": "phase"}
+{"at": "2026-10-04T09:20:00Z", "event": "start", "span": "s-201-review", "issue": 201, "phase": "review", "category": "phase"}
+{"at": "2026-10-04T09:55:00Z", "event": "end", "span": "s-201-review", "issue": 201, "phase": "review", "category": "phase", "outcome": "passed"}
+{"at": "2026-10-04T10:45:00Z", "event": "start", "span": "s-103-review-a", "issue": 103, "phase": "review", "category": "phase"}
+{"at": "2026-10-04T10:50:00Z", "event": "end", "span": "s-103-review-a", "issue": 103, "phase": "review", "category": "phase", "outcome": "returned"}
+{"at": "2026-10-04T11:00:00Z", "event": "start", "span": "s-103-review-b", "issue": 103, "phase": "code_review", "category": "review"}

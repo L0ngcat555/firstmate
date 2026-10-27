@@ -1,0 +1,8 @@
+{
+  "issue": 201,
+  "pr": 9201,
+  "merged_sha": "abcdef0123456789abcdef0123456789abcdef01",
+  "development": "3333333333333333",
+  "smoke": "4444444444444444",
+  "completed_at": "2026-10-04T10:20:00Z"
+}
