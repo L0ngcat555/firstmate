@@ -1,0 +1,25 @@
+{
+  "claims": {
+    "101": {
+      "task": "ombra-gh-101",
+      "claimed_at": "2026-10-04T09:00:00Z",
+      "issue_updated_at": "2026-10-04T08:59:00Z",
+      "attempt": "fixture-101"
+    },
+    "102": {
+      "task": "ombra-gh-102",
+      "claimed_at": "2026-10-04T09:00:00Z",
+      "issue_updated_at": "2026-10-04T08:59:00Z",
+      "attempt": "fixture-102"
+    }
+  },
+  "actions": [
+    {
+      "action": "release",
+      "issue": 102,
+      "at": "2026-10-04T10:20:00Z",
+      "reason": "fixture release: issue closed without delivery"
+    }
+  ],
+  "phases": {}
+}

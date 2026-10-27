@@ -1,0 +1,7 @@
+#!/bin/sh
+# Print the progress JSON snapshot (roadmap contract command).
+set -eu
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+exec python3 -m ops.progress_data "$@"
